@@ -1,0 +1,884 @@
+global:
+
+  domain: "coralogix.com" 
+  clusterName: "rm-test"
+  defaultApplicationName: "otel"
+  defaultSubsystemName: "integration"
+  logLevel: "warn"
+
+  extensions:
+    kubernetesDashboard:
+      enabled: true
+
+# set distribution to openshift for openshift clusters
+distribution: "openshift"
+opentelemetry-agent:
+  enabled: true
+  mode: daemonset
+  fullnameOverride: enxc-opentelemetry
+  extraVolumes:
+    - name: etcmachineid
+      hostPath:
+        path: /etc/machine-id
+    - name: varlibdbusmachineid
+      hostPath:
+        path: /var/lib/dbus/machine-id
+
+  extraVolumeMounts:
+    - mountPath: /etc/machine-id
+      mountPropagation: HostToContainer
+      name: etcmachineid
+      readOnly: true
+    - mountPath: /var/lib/dbus/machine-id
+      mountPropagation: HostToContainer
+      name: varlibdbusmachineid
+      readOnly: true
+
+  extraEnvs:
+    - name: CORALOGIX_PRIVATE_KEY
+      valueFrom:
+        secretKeyRef:
+          name: coralogix-keys
+          key: PRIVATE_KEY
+    
+    - name: LOGICMONITOR_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: logicmonitor-keys
+          key: access_key
+    - name: LOGICMONITOR_ACCESS_ID
+      valueFrom:
+        secretKeyRef:
+          name: logicmonitor-keys
+          key: access_id
+
+    - name: OTEL_RESOURCE_ATTRIBUTES
+      value: "k8s.node.name=$(K8S_NODE_NAME),k8s.pod.name=$(K8S_POD_NAME),k8s.namespace=$(K8S_NAMESPACE_NAME)"
+    - name: KUBE_NODE_NAME
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: spec.nodeName    
+    - name: K8S_POD_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.name
+    - name: K8S_NAMESPACE_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+
+    - name: HTTP_PROXY
+      valueFrom:
+        configMapKeyRef:
+          name: otel-euronext-config
+          key: HTTP_PROXY
+    - name: HTTPS_PROXY
+      valueFrom:
+        configMapKeyRef:
+          name: otel-euronext-config
+          key: HTTPS_PROXY
+    - name: NO_PROXY
+      valueFrom:
+        configMapKeyRef:
+          name: otel-euronext-config
+          key: NO_PROXY
+      
+    - name: ENVIRONMENT
+      valueFrom:
+        configMapKeyRef:
+          name: otel-euronext-config
+          key: ENVIRONMENT
+    - name: CLUSTERNAME
+      valueFrom:
+        configMapKeyRef:
+          name: otel-euronext-config
+          key: CLUSTERNAME
+
+
+
+  serviceAccount:
+    # Specifies whether a service account should be created
+    create: true
+    # Annotations to add to the service account
+    annotations: {}
+    # The name of the service account to use.
+    # If not set and create is true, a name is generated using the fullname template
+    name: ""
+  clusterRole:
+    name: "coralogix-opentelemetry-agent"
+    clusterRoleBinding:
+      name: "coralogix-opentelemetry-agent"
+  priorityClass:
+    # Specifies whether a priorityClass should be created.
+    create: false
+    # The name of the clusterRole to use.
+    # If not set a name is generated using the fullname template.
+    name: ""
+    # Sets the priority value of the priority class.
+    priorityValue: 1000000000
+  hostNetwork: true
+  dnsPolicy: "ClusterFirstWithHostNet"
+
+  presets:
+    metadata:
+      enabled: true
+      #clusterName: "{{.Values.global.clusterName}}"
+      clusterName: "${CLUSTERNAME}"
+      integrationName: "coralogix-integration-helm"
+    logsCollection:
+      enabled: true
+      storeCheckpoints: true
+      maxRecombineLogSize: 1048576
+      extraFilelogOperators: []
+#     - type: recombine
+#       combine_field: body
+#       source_identifier: attributes["log.file.path"]
+#       is_first_entry: body matches "^(YOUR-LOGS-REGEX)"
+    kubernetesAttributes:
+      enabled: true
+    hostMetrics:
+      enabled: true
+    kubeletMetrics:
+      enabled: true
+
+  config:
+    extensions:
+      zpages:
+        endpoint: localhost:55679
+      pprof:
+        endpoint: localhost:1777
+
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: ${MY_POD_IP}:4319
+          http:
+            endpoint: ${MY_POD_IP}:4320
+      zipkin:
+        endpoint: ${MY_POD_IP}:9411
+      jaeger:
+        protocols:
+          grpc:
+            endpoint: ${MY_POD_IP}:14250
+          thrift_http:
+            endpoint: ${MY_POD_IP}:14268
+          thrift_compact:
+            endpoint: ${MY_POD_IP}:6831
+          thrift_binary:
+            endpoint: ${MY_POD_IP}:6832
+      prometheus:
+        config:
+          scrape_configs:
+          - job_name: opentelemetry-collector
+            scrape_interval: 30s
+            static_configs:
+              - targets:
+                  - ${MY_POD_IP}:8888
+
+
+
+      filelog:
+        exclude:
+        - /var/log/pods/otel-euronext_*/*/*.log
+        - /var/log/pods/open-cluster-management-agent-addon_application-manager-*/*/*.log
+        - /var/log/pods/instana-agent_instana-agent-*/*/*.log
+        include:
+        - /var/log/pods/*/*/*.log
+        include_file_name: false
+        include_file_path: true
+        operators:
+        - id: get-format
+          routes:
+          - expr: body matches "^\\{"
+            output: parser-docker
+          - expr: body matches "^[^ Z]+ "
+            output: parser-crio
+          - expr: body matches "^[^ Z]+Z"
+            output: parser-containerd
+          type: router
+        - id: parser-crio
+          output: extract_metadata_from_filepath
+          regex: ^(?P<time>[^ Z]+) (?P<stream>stdout|stderr) (?P<logtag>[^ ]*) ?(?P<log>.*)$
+          timestamp:
+            layout: 2006-01-02T15:04:05.999999999Z07:00
+            layout_type: gotime
+            parse_from: attributes.time
+          type: regex_parser
+        - id: parser-containerd
+          output: extract_metadata_from_filepath
+          regex: ^(?P<time>[^ ^Z]+Z) (?P<stream>stdout|stderr) (?P<logtag>[^ ]*) ?(?P<log>.*)$
+          timestamp:
+            layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+            parse_from: attributes.time
+          type: regex_parser
+        - id: parser-docker
+          output: extract_metadata_from_filepath
+          timestamp:
+            layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+            parse_from: attributes.time
+          type: json_parser
+        - id: extract_metadata_from_filepath
+          parse_from: attributes["log.file.path"]
+          regex: ^.*\/(?P<namespace>[^_]+)_(?P<pod_name>[^_]+)_(?P<uid>[a-f0-9\-]+)\/(?P<container_name>[^\._]+)\/(?P<restart_count>\d+)\.log$
+          type: regex_parser
+        - from: attributes.stream
+          to: attributes["log.iostream"]
+          type: move
+        - from: attributes.container_name
+          to: attributes["k8s.container.name"]
+          type: move
+        - from: attributes.namespace
+          to: attributes["k8s.namespace.name"]
+          type: move
+        - from: attributes.pod_name
+          to: attributes["k8s.pod.name"]
+          type: move
+        - from: attributes.restart_count
+          to: attributes["k8s.container.restart_count"]
+          type: move
+        - from: attributes.uid
+          to: attributes["k8s.pod.uid"]
+          type: move
+        - from: attributes.log
+          to: body
+          type: move
+        start_at: beginning
+        storage: file_storage
+
+      filelog/cx:
+        exclude:
+        - /var/log/pods/otel-euronext_otel-euronext*_*/opentelemetry-collector/*.log
+        - /var/log/pods/open-cluster-management-agent-addon_application-manager-*/*/*.log
+        - /var/log/pods/instana-agent_instana-agent-*/*/*.log
+        include:
+        - /var/log/pods/*/*/*.log
+        include_file_name: false
+        include_file_path: true
+        operators:
+        - id: get-format
+          routes:
+          - expr: body matches "^\\{"
+            output: parser-docker
+          - expr: body matches "^[^ Z]+ "
+            output: parser-crio
+          - expr: body matches "^[^ Z]+Z"
+            output: parser-containerd
+          type: router
+        - id: parser-crio
+          output: extract_metadata_from_filepath
+          regex: ^(?P<time>[^ Z]+) (?P<stream>stdout|stderr) (?P<logtag>[^ ]*) ?(?P<log>.*)$
+          timestamp:
+            layout: 2006-01-02T15:04:05.999999999Z07:00
+            layout_type: gotime
+            parse_from: attributes.time
+          type: regex_parser
+        - id: parser-containerd
+          output: extract_metadata_from_filepath
+          regex: ^(?P<time>[^ ^Z]+Z) (?P<stream>stdout|stderr) (?P<logtag>[^ ]*) ?(?P<log>.*)$
+          timestamp:
+            layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+            parse_from: attributes.time
+          type: regex_parser
+        - id: parser-docker
+          output: extract_metadata_from_filepath
+          timestamp:
+            layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+            parse_from: attributes.time
+          type: json_parser
+        - id: extract_metadata_from_filepath
+          parse_from: attributes["log.file.path"]
+          regex: ^.*\/(?P<namespace>[^_]+)_(?P<pod_name>[^_]+)_(?P<uid>[a-f0-9\-]+)\/(?P<container_name>[^\._]+)\/(?P<restart_count>\d+)\.log$
+          type: regex_parser
+        - from: attributes.stream
+          to: attributes["log.iostream"]
+          type: move
+        - from: attributes.container_name
+          to: resource["k8s.container.name"]
+          type: move
+        - from: attributes.namespace
+          to: resource["k8s.namespace.name"]
+          type: move
+        - from: attributes.pod_name
+          to: resource["k8s.pod.name"]
+          type: move
+        - from: attributes.restart_count
+          to: resource["k8s.container.restart_count"]
+          type: move
+        - from: attributes.uid
+          to: resource["k8s.pod.uid"]
+          type: move
+        - from: attributes.log
+          to: body
+          type: move
+        start_at: beginning
+        storage: file_storage
+        
+      syslog:
+        tcp:
+          listen_address: '0.0.0.0:54527'
+        protocol: rfc3164
+        location: UTC # specify server timezone here
+        operators:
+        - from: attributes.message
+          to: body
+          type: move
+
+    processors:
+      resourcedetection/env:
+        detectors: ["system", "env"]
+        timeout: 2s
+        override: false
+        system:
+          resource_attributes:
+            host.id:
+             enabled: true
+      resourcedetection/region:
+        detectors: ["gcp", "ec2"]
+        timeout: 2s
+        override: true
+      k8sattributes:
+        filter:
+          node_from_env_var: KUBE_NODE_NAME
+        extract:
+          metadata:
+            - "k8s.namespace.name"
+            # replace the below by `k8s.deployment.name` after https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/23067
+            - "k8s.replicaset.name"
+            - "k8s.statefulset.name"
+            - "k8s.daemonset.name"
+            - "k8s.cronjob.name"
+            - "k8s.job.name"
+            - "k8s.pod.name"
+            - "k8s.node.name"
+      spanmetrics:
+        metrics_exporter: coralogix
+        dimensions:
+          # replace the below by `k8s.deployment.name` after https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/23067
+          - name: "k8s.replicaset.name"
+          - name: "k8s.statefulset.name"
+          - name: "k8s.daemonset.name"
+          - name: "k8s.cronjob.name"
+          - name: "k8s.job.name"
+          - name: "k8s.container.name"
+          - name: "k8s.node.name"
+          - name: "k8s.namespace.name"
+      # Will get the k8s resource limits
+      memory_limiter: null
+
+
+      attributes/k8s_logs:
+        actions:
+          - action: insert 
+            key: system.displayname
+            value: ${K8S_NODE_NAME}
+          - action: insert
+            key: k8s.clustername
+            value: "${CLUSTERNAME}" 
+          - action: insert
+            key: k8s.environment
+            value: "${ENVIRONMENT}" 
+          - action: insert
+            key: k8s.pod.name
+            value: ${K8S_POD_NAME}
+          - action: insert
+            key: k8s.namespace.name
+            value: ${K8S_NAMESPACE_NAME}
+          - action: insert
+            key: k8s.pod.ip
+            value: ${MY_POD_IP}
+          - action: insert
+            key: k8s.logs.source
+            value: "filelog"
+
+      attributes/k8s_syslog:
+        actions:
+          - action: insert 
+            key: system.displayname
+            value: ${K8S_NODE_NAME}
+          - action: insert
+            key: k8s.clustername
+            value: "${CLUSTERNAME}" #"{{.Values.global.clustername }}"
+          - action: insert
+            key: k8s.environment
+            value: "${ENVIRONMENT}" #"{{.Values.global.environmnts }}"
+          - action: insert
+            key: k8s.pod.name
+            value: ${K8S_POD_NAME}
+          - action: insert
+            key: k8s.namespace.name
+            value: ${K8S_NAMESPACE_NAME}
+          - action: insert
+            key: k8s.pod.ip
+            value: ${MY_POD_IP}
+          - action: insert
+            key: k8s.logs.source
+            value: "syslog"
+
+      resource/map:
+        attributes:
+        - key: system.displayname
+          value: ${K8S_NODE_NAME}
+          action: insert  
+        - pattern: ^k8.*
+          action: delete
+        - pattern: ^cx.*
+          action: delete
+        - pattern: ^host.*
+          action: delete
+        - pattern: ^os.*
+          action: delete
+          #"resourcemap":{"host.id":"edd9ad7ce65e4fccb5af61c3122fcd75","host.name":"worker3.enxctrmapp.ccg.local","os.type":"linux","system.displayname":"worker3.enxctrmapp.ccg.local"} 
+      filter/bodies_lm:
+        logs:
+          include:
+            bodies:
+            - ".*\\b(ERROR|CRITICAL)\\b.*" #logs filter
+            - ".*\\b(Redis Response Received)\\b.*\\b(KO)\\b.*" #logs filter
+            - '.*"level":\s*"(error|critical|alert|emergency)"' #syslog filter
+            match_type: regexp
+          exclude:  
+            bodies:
+            - "(.*)(clusterconfig failed after)(.*)(with: function)(.*)(failed with an error)(.*)(insights-operator)(.*)" # https://access.redhat.com/support/cases/#/case/03628470 RH closed case "skip alarm"
+            - "(.*)(error obtaining FibreChannel class info: failed to read file)(.*)(symbolic_name)(.*)" # https://access.redhat.com/support/cases/#/case/03624350 RH closed case "skip alarm" https://issues.redhat.com/browse/OCPBUGS-20151
+            - "(.*)(timeout or abort while handling)(.*)(GET URI)(.*)(apis)(.*)(openshift)(.*)" ## kb: https://access.redhat.com/solutions/7012177
+            - "(.*)(Pod IsNotFound).*" ## The AMQ operator in OpenShift is scanning all the STS (StatefulSets) in our systems, resulting in a 'pod not found' error, which is expected.
+            - "(.*)(Operation cannot be fulfilled)(.*)(please apply your changes to the latest version and try again)(.*)" ## kb: https://access.redhat.com/solutions/5881111 
+            - "(.*)(failed with admission webhook)(.*)(vault.hashicorp.com)(.*)(denied the request: error validating agent configuration: no Vault role found)(.*)" ## Tascioni: It seems a bug Hashicorp openshift; You cannot consider it.
+            - "(.*)(openshift-insights)(.*)(gatherer)(.*)(clusterconfig)(.*)(function)(.*)(config_maps)(.*)(failed with the error: configmaps)(.*)(gateway-mode-config)(.*)(not found)(.*)" ## config map has been removed from 4.12. ## kb: https://access.redhat.com/solutions/7008996
+            - "(.*)(insights-operator)\b.*(clusterconfig failed after)(.*)(config_maps)(.*)(failed with an error)(.*)" ## config map has been removed from 4.12. ## kb: https://access.redhat.com/solutions/7008996
+            - "(.*)(GET request for)(.*)(acm|mce|odf-console)(.*)(plugin failed with 304 status code)(.*)"  ##https://access.redhat.com/solutions/7027491
+            - "(.*)(Failed sending HTTP response body)(.*)(http)(.*)(request method or response status code does not allow body)(.*)"  ##https://access.redhat.com/solutions/7027491
+            match_type: regexp
+
+      filter/bodies_cx:
+        logs:
+          exclude:  
+            bodies:
+            - "(.*)(clusterconfig failed after)(.*)(with: function)(.*)(failed with an error)(.*)(insights-operator)(.*)" # https://access.redhat.com/support/cases/#/case/03628470 RH closed case "skip alarm"
+            - "(.*)(error obtaining FibreChannel class info: failed to read file)(.*)(symbolic_name)(.*)" # https://access.redhat.com/support/cases/#/case/03624350 RH closed case "skip alarm" https://issues.redhat.com/browse/OCPBUGS-20151
+            - "(.*)(timeout or abort while handling)(.*)(GET URI)(.*)(apis)(.*)(openshift)(.*)" ## kb: https://access.redhat.com/solutions/7012177
+            - "(.*)(Pod IsNotFound).*" ## The AMQ operator in OpenShift is scanning all the STS (StatefulSets) in our systems, resulting in a 'pod not found' error, which is expected.
+            - "(.*)(Operation cannot be fulfilled)(.*)(please apply your changes to the latest version and try again)(.*)" ## kb: https://access.redhat.com/solutions/5881111 
+            - "(.*)(failed with admission webhook)(.*)(vault.hashicorp.com)(.*)(denied the request: error validating agent configuration: no Vault role found)(.*)" ## Tascioni: It seems a bug Hashicorp openshift; You cannot consider it.
+            - "(.*)(openshift-insights)(.*)(gatherer)(.*)(clusterconfig)(.*)(function)(.*)(config_maps)(.*)(failed with the error: configmaps)(.*)(gateway-mode-config)(.*)(not found)(.*)" ## config map has been removed from 4.12. ## kb: https://access.redhat.com/solutions/7008996
+            - "(.*)(insights-operator)\b.*(clusterconfig failed after)(.*)(config_maps)(.*)(failed with an error)(.*)" ## config map has been removed from 4.12. ## kb: https://access.redhat.com/solutions/7008996
+            - "(.*)(GET request for)(.*)(acm|mce|odf-console)(.*)(plugin failed with 304 status code)(.*)"  ##https://access.redhat.com/solutions/7027491
+            - "(.*)(Failed sending HTTP response body)(.*)(http)(.*)(request method or response status code does not allow body)(.*)"  ##https://access.redhat.com/solutions/7027491
+            match_type: regexp
+      
+      filter/namespaces_cte2:
+        logs:
+          include:
+            match_type: regexp
+            record_attributes:
+            - key: k8s.namespace.name
+              value: "^(openshift|kube|default|eu-kafka-cte|eu-.+-cte2)$"
+
+    exporters:
+      coralogix:
+        timeout: "30s"
+        private_key: "${CORALOGIX_PRIVATE_KEY}"
+        domain: "{{ .Values.global.domain }}"
+        application_name: "{{ .Values.global.defaultApplicationName }}"
+        subsystem_name: "{{ .Values.global.defaultSubsystemName }}"
+        application_name_attributes:
+          - "k8s.namespace.name"
+          - "service.namespace"
+        subsystem_name_attributes:
+          - "k8s.deployment.name"
+          - "k8s.statefulset.name"
+          - "k8s.daemonset.name"
+          - "k8s.cronjob.name"
+          - "service.name"
+
+      logicmonitor:
+        endpoint: "https://euronext.logicmonitor.com/rest"
+        api_token:
+          access_id: "${LOGICMONITOR_ACCESS_ID}" 
+          access_key: "${LOGICMONITOR_ACCESS_KEY}"
+
+    service:
+      telemetry:
+        logs:
+          level: "{{ .Values.global.logLevel }}"
+          encoding: json
+        metrics:
+          address: ${MY_POD_IP}:8888
+      extensions:
+      - zpages
+      - pprof
+      - health_check
+      - memory_ballast
+      pipelines:
+        metrics:
+          exporters:
+            - coralogix
+          processors:
+            - k8sattributes
+            - resourcedetection/env
+            - resourcedetection/region
+            - memory_limiter
+            - batch
+          receivers:
+            - otlp
+            - prometheus
+            - hostmetrics
+        traces:
+          exporters:
+            - coralogix
+          processors:
+            - k8sattributes
+            - resourcedetection/env
+            - resourcedetection/region
+            - memory_limiter
+            - spanmetrics
+            - batch
+          receivers:
+            - otlp
+            - zipkin
+            - jaeger
+        logs:
+          exporters:
+          - logicmonitor
+          processors:
+          - k8sattributes
+          - resourcedetection/env
+          - batch
+          - resource/map
+          - filter/bodies_lm
+          - attributes/k8s_logs
+            # - filter/namespaces_cte2
+          receivers:
+          - otlp
+          - filelog
+        logs/syslog:
+          exporters:
+          - logicmonitor
+          processors:
+          - k8sattributes
+          - resourcedetection/env
+          - batch
+          - resource/map
+          - filter/bodies_lm
+          - attributes/k8s_syslog
+          receivers:
+          - syslog
+        logs/cx:
+          exporters:
+          - coralogix
+          processors:
+          - k8sattributes
+          - resourcedetection/env
+          - batch
+          - filter/bodies_cx
+            # - filter/namespaces_cte2
+          receivers:
+          - filelog/cx
+          - otlp
+          - syslog
+  tolerations:
+    - operator: Exists
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 1
+      memory: 2G
+
+  ports:
+    jaeger-binary:
+      enabled: true
+      containerPort: 6832
+      servicePort: 6832
+      hostPort: 6832
+      protocol: TCP
+    # In order to enable podMonitor, following part must be enabled in order to expose the required port:
+    # metrics:
+    #   enabled: true
+
+  # podMonitor:
+  #   enabled: true
+
+  # prometheusRule:
+  #   enabled: true
+  #   defaultRules:
+  #     enabled: true
+
+opentelemetry-cluster-collector:
+  enabled: true
+  mode: deployment
+  fullnameOverride: enxc-opentelemetry-collector
+  clusterRole:
+    name: "enxc-opentelemetry-collector"
+    create: true
+    clusterRoleBinding:
+      name: "enxc-opentelemetry-collector"
+  priorityClass:
+    # Specifies whether a priorityClass should be created.
+    create: false
+    # The name of the clusterRole to use.
+    # If not set a name is generated using the fullname template.
+    name: ""
+    # Sets the priority value of the priority class.
+    priorityValue: 1000000000
+  replicaCount: 1
+  presets:
+    clusterMetrics:
+      enabled: true
+    kubernetesEvents:
+      enabled: true
+    kubernetesExtraMetrics:
+      enabled: true
+      kubeStateMetricsName: "enxc-opentelemetry-kube-state-metrics"
+    kubernetesAttributes:
+      enabled: true
+    mysql:
+      metrics:
+        enabled: false
+        instances:
+        - username: ""
+          password: ""
+          port: 3306
+      extraLogs:
+        enabled: false
+        volumeMountName: ""
+        mountPath: ""
+    metadata:
+      enabled: true
+      clusterName: "{{.Values.global.clusterName}}"
+      integrationName: "coralogix-integration-helm"
+
+  extraEnvs:
+  - name: CORALOGIX_PRIVATE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: coralogix-keys
+        key: PRIVATE_KEY
+  - name: KUBE_NODE_NAME
+    valueFrom:
+      fieldRef:
+        apiVersion: v1
+        fieldPath: spec.nodeName
+
+
+  - name: HTTP_PROXY
+    valueFrom:
+      configMapKeyRef:
+        name: otel-euronext-config
+        key: HTTP_PROXY
+  - name: HTTPS_PROXY
+    valueFrom:
+      configMapKeyRef:
+        name: otel-euronext-config
+        key: HTTPS_PROXY
+  - name: NO_PROXY
+    valueFrom:
+      configMapKeyRef:
+        name: otel-euronext-config
+        key: NO_PROXY
+      
+  - name: ENVIRONMENT
+    valueFrom:
+      configMapKeyRef:
+        name: otel-euronext-config
+        key: ENVIRONMENT
+  - name: CLUSTERNAME
+    valueFrom:
+      configMapKeyRef:
+        name: otel-euronext-config
+        key: CLUSTERNAME
+
+  - name: LOGICMONITOR_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: logicmonitor-keys
+        key: access_key
+  - name: LOGICMONITOR_ACCESS_ID
+    valueFrom:
+      secretKeyRef:
+        name: logicmonitor-keys
+        key: access_id
+
+
+  config:
+    extensions:
+      zpages:
+        endpoint: localhost:55679
+      pprof:
+        endpoint: localhost:1777
+    receivers:
+      k8s_cluster:
+        collection_interval: 10s
+        allocatable_types_to_report: [cpu, memory]
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: opentelemetry-infrastructure-collector
+              scrape_interval: 30s
+              static_configs:
+                - targets:
+                    - ${MY_POD_IP}:8888
+    processors:
+      k8sattributes:
+        filter:
+          node_from_env_var: KUBE_NODE_NAME
+        extract:
+          metadata:
+            - "k8s.namespace.name"
+            # replace the below by `k8s.deployment.name` after https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/23067
+            - "k8s.replicaset.name"
+            - "k8s.statefulset.name"
+            - "k8s.daemonset.name"
+            - "k8s.cronjob.name"
+            - "k8s.job.name"
+            - "k8s.pod.name"
+            - "k8s.node.name"
+      resource/kube-events:
+        attributes:
+          - key: service.name
+            value: "kube-events"
+            action: upsert
+          - key: k8s.cluster.name
+            value: "${CLUSTERNAME}"
+            action: upsert
+      transform/kube-events:
+        log_statements:
+          - context: log
+            statements:
+              - keep_keys(body["object"], ["type", "eventTime", "reason", "regarding", "note", "metadata", "deprecatedFirstTimestamp", "deprecatedLastTimestamp"])
+              - keep_keys(body["object"]["metadata"], ["creationTimestamp"])
+              - keep_keys(body["object"]["regarding"], ["kind", "name", "namespace"])
+      metricstransform/kube-extra-metrics:
+        transforms:
+          # Replace node name for kube node info with the name of the target node.
+        - include: kube_node_info
+          match_type: strict
+          action: update
+          operations:
+            - action: update_label
+              label: node
+              new_label: k8s.node.name
+      transform/k8s-dashboard:
+        error_mode: ignore
+        metric_statements:
+          - context: metric
+            statements:
+              - set(unit, "1") where name == "k8s.pod.phase"
+      resourcedetection/env:
+        detectors: ["system", "env"]
+        timeout: 2s
+        override: false
+      resourcedetection/region:
+        detectors: ["gcp", "ec2"]
+        timeout: 2s
+        override: true
+      # Will get the k8s resource limits
+      memory_limiter: null
+
+    exporters:
+      coralogix:
+        timeout: "30s"
+        private_key: "${CORALOGIX_PRIVATE_KEY}"
+        domain: "{{ .Values.global.domain }}"
+        application_name: "{{ .Values.global.defaultApplicationName }}"
+        subsystem_name: "{{ .Values.global.defaultSubsystemName }}"
+        application_name_attributes:
+          - "k8s.namespace.name"
+          - "service.namespace"
+        subsystem_name_attributes:
+          - "k8s.deployment.name"
+          - "k8s.statefulset.name"
+          - "k8s.daemonset.name"
+          - "k8s.cronjob.name"
+          - "service.name"
+
+    service:
+      telemetry:
+        logs:
+          level: "{{ .Values.global.logLevel }}"
+          encoding: json
+        metrics:
+          address: ${MY_POD_IP}:8888
+      extensions:
+      - zpages
+      - pprof
+      - health_check
+      - memory_ballast
+      pipelines:
+        logs:
+          exporters:
+            - coralogix
+          processors:
+            - memory_limiter
+            - batch
+            - resource/kube-events
+            - transform/kube-events
+        metrics:
+          exporters:
+            - coralogix
+          processors:
+            - k8sattributes
+            - metricstransform/kube-extra-metrics
+            - transform/k8s-dashboard
+            - resourcedetection/env
+              # - resourcedetection/region
+            - memory_limiter
+            - batch
+          receivers:
+            - otlp
+            - prometheus
+            - k8s_cluster
+  tolerations:
+    - operator: Exists
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 1
+      memory: 2G
+
+  ports:
+    otlp:
+      enabled: true
+    otlp-http:
+      enabled: false
+    jaeger-compact:
+      enabled: false
+    jaeger-thrift:
+      enabled: false
+    jaeger-grpc:
+      enabled: false
+    zipkin:
+      enabled: false
+    # In order to enable serviceMonitor, following part must be enabled in order to expose the required port:
+    # metrics:
+    #   enabled: true
+
+  # serviceMonitor:
+  #   enabled: true
+
+  # prometheusRule:
+  #   enabled: true
+  #   defaultRules:
+  #     enabled: true
+
+opentelemetry-agent-windows:
+  enabled: false
+
+kube-state-metrics:
+  fullnameOverride: enxc-opentelemetry-kube-state-metrics
+  prometheusScrape: false
+  collectors:
+    - pods
+    - nodes
+  metricAllowlist:
+    - kube_node_info
+    - kube_pod_status_reason
+    - kube_pod_status_phase
+    - kube_pod_status_qos_class

@@ -1,0 +1,15 @@
+dependencies:
+- name: opentelemetry-collector
+  repository: https://cgx.jfrog.io/artifactory/coralogix-charts-virtual
+  version: 0.76.3
+- name: opentelemetry-collector
+  repository: https://cgx.jfrog.io/artifactory/coralogix-charts-virtual
+  version: 0.76.3
+- name: opentelemetry-collector
+  repository: https://cgx.jfrog.io/artifactory/coralogix-charts-virtual
+  version: 0.76.3
+- name: kube-state-metrics
+  repository: https://prometheus-community.github.io/helm-charts
+  version: 5.8.1
+digest: sha256:7b4a895cb7928f5aa8cad829723815d81e776a34ebd3d062bf0b5c86270febdf
+generated: "2023-11-06T13:27:47.537606263Z"

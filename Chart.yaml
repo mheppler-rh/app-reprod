@@ -1,0 +1,35 @@
+apiVersion: v2
+dependencies:
+- alias: opentelemetry-agent
+  condition: opentelemetry-agent.enabled
+  name: opentelemetry-collector
+  repository: https://cgx.jfrog.io/artifactory/coralogix-charts-virtual
+  version: 0.76.3
+- alias: opentelemetry-agent-windows
+  condition: opentelemetry-agent-windows.enabled
+  name: opentelemetry-collector
+  repository: https://cgx.jfrog.io/artifactory/coralogix-charts-virtual
+  version: 0.76.3
+- alias: opentelemetry-cluster-collector
+  condition: opentelemetry-cluster-collector.enabled
+  name: opentelemetry-collector
+  repository: https://cgx.jfrog.io/artifactory/coralogix-charts-virtual
+  version: 0.76.3
+- condition: global.extensions.kubernetesDashboard.enabled
+  name: kube-state-metrics
+  repository: https://prometheus-community.github.io/helm-charts
+  version: 5.8.1
+description: OpenTelemetry Integration
+keywords:
+- OpenTelemetry Collector
+- OpenTelemetry Agent
+- OpenTelemetry Integration
+- Kubernetes
+- Coralogix
+maintainers:
+- email: platform@coralogix.com
+  name: Coralogix
+name: otel-integration
+sources:
+- https://github.com/coralogix/opentelemetry-helm-charts/tree/main/charts/opentelemetry-collector
+version: 0.0.32
